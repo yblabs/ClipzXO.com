@@ -11,4 +11,5 @@ output/
 preview.html
 .pytest_cache/
 .ScreenPal/
-.agents/   # local tool config (symlink into .venv)
+# local tool config (symlink into .venv — broken on GitHub)
+.agents/

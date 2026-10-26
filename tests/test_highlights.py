@@ -192,12 +192,12 @@ def test_adaptive_band_shrinks_for_short_source():
     assert count * lo + (count - 1) * gap <= 81.7 + 1e-6
 
 
-def test_adaptive_band_caps_count_at_what_fits():
-    # 30s source can't hold 8 clips even at the 8s floor — fewer, longer ones
+def test_adaptive_band_never_reduces_count():
+    # even a 30s source asked for 8 clips keeps the count — clips just shrink
     lo, hi, gap, count = adaptive_band(duration=30.0, count=8)
-    assert count < 8
-    assert count >= 1
-    assert count * lo + (count - 1) * gap <= 30.0 + 1e-6
+    assert count == 8                       # the slider number is the contract
+    assert lo >= MIN_CLIP_SECONDS
+    assert lo <= hi
 
 
 def test_short_source_yields_requested_clip_count():
@@ -211,3 +211,21 @@ def test_short_source_yields_requested_clip_count():
         assert 0 <= hl.start < hl.end <= tr.duration
     for prev, cur in zip(out, out[1:]):
         assert cur.start >= prev.end, "clips must not overlap"
+
+
+def test_every_slider_value_delivers_exact_count():
+    """Regression: picking 9 gave 8 (an 8s clip floor silently rounded down).
+    ANY number 1–10 on the slider must produce exactly that many clips."""
+    tr = _short_transcript(81.7)
+    for want in range(1, 11):
+        sel = select_highlights(tr, provider="heuristic", count=want)
+        out = sel.highlights
+        assert len(out) == want, (
+            f"asked for {want} clips, got {len(out)}: "
+            f"{[(h.start, h.end) for h in out]}"
+        )
+        for hl in out:
+            assert hl.duration >= MIN_CLIP_SECONDS - 0.5, (want, hl)
+            assert 0 <= hl.start < hl.end <= tr.duration
+        for prev, cur in zip(out, out[1:]):
+            assert cur.start >= prev.end, (want, "overlap", prev, cur)

@@ -31,7 +31,10 @@ SYSTEM_PROMPT = (
 # Absolute floor: never cut a clip shorter than this, even when the user asks
 # for more clips than a 30–60s band can fit (Shorts/Reels live happily on
 # ~8–15s clips; below that a clip is just a blip).
-MIN_CLIP_SECONDS = 8.0
+# HARD RULE: the number the user picks on the slider is ALWAYS honoured —
+# clips shrink to fit, the count is never reduced. This is the absolute
+# shortest a clip may get before it stops being a usable Short.
+MIN_CLIP_SECONDS = 3.0
 
 # Standard band when the source is long enough for the requested count.
 SEP_GAP = 3.0  # required gap between two chosen clips
@@ -41,10 +44,9 @@ def adaptive_band(duration: float, count: int) -> tuple[float, float, float, int
     """Clip-length band + separation gap + count that actually fit the source.
 
     The configured 30–60s band is ideal, but a short source asked to produce
-    many clips (e.g. an 82s video → 8 clips) can't hold count × 30s without
+    many clips (e.g. an 82s video → 9 clips) can't hold count × 30s without
     overlap. In that case the band shrinks toward (duration − gaps)/count so
-    the REQUESTED COUNT is honoured with shorter clips; if even MIN_CLIP_SECONDS
-    clips can't fit, the count is reduced instead.
+    the REQUESTED COUNT is always honoured with shorter clips.
 
     Returns (min_seconds, max_seconds, gap, count). Long sources keep the
     configured band and the 3s separation unchanged.
@@ -54,15 +56,11 @@ def adaptive_band(duration: float, count: int) -> tuple[float, float, float, int
     count = max(1, int(count))
     if not duration or duration >= count * lo:
         return lo, hi, SEP_GAP, count  # plenty of footage — standard band
-    # not enough footage: shrink so `count` clips + (count-1) gaps fit
-    gap = min(SEP_GAP, max(0.5, duration / count * 0.15))
-    usable = duration - gap * (count - 1)
+    # not enough footage: shrink so `count` clips + (count-1) gaps fit.
+    # The COUNT is never touched — it is what the user asked for.
+    gap = min(SEP_GAP, max(0.35, duration / count * 0.12))
+    usable = max(duration - gap * (count - 1), duration * 0.5)
     target = usable / count
-    if target < MIN_CLIP_SECONDS:
-        # even the floor can't fill the count — take as many full clips as fit
-        count = max(1, int((duration + gap) // (MIN_CLIP_SECONDS + gap)))
-        usable = duration - gap * (count - 1)
-        target = usable / count if count else duration
     floor = min(MIN_CLIP_SECONDS, duration)
     lo_new = max(floor, min(lo, target * 0.8))
     hi_new = max(lo_new + 1.0, min(hi, target * 1.3))
@@ -489,17 +487,9 @@ def select_highlights(
 ) -> HighlightSelection:
     count = count or config.MAX_HIGHLIGHTS
     resolved = resolve_provider(provider)
-    min_count = min(config.MIN_HIGHLIGHTS, count)
     band = adaptive_band(transcript.duration or 0.0, count)
-    min_seconds, max_seconds, gap, band_count = band
-    if band_count < count:
-        log(
-            f"Source is too short for {count} × {config.MIN_HIGHLIGHT_SECONDS:.0f}s clips — "
-            f"cutting {band_count} clip(s) instead (min {MIN_CLIP_SECONDS:.0f}s each)"
-        )
-        count = band_count
-        min_count = min(min_count, count)
-    elif max_seconds < config.MAX_HIGHLIGHT_SECONDS:
+    min_seconds, max_seconds, gap, _band_count = band
+    if max_seconds < config.MAX_HIGHLIGHT_SECONDS:
         log(
             f"Short source ({transcript.duration or 0:.0f}s): shrinking clips to "
             f"{min_seconds:.0f}–{max_seconds:.0f}s so all {count} requested clips fit"
@@ -508,8 +498,10 @@ def select_highlights(
     if resolved == "heuristic":
         log("No LLM API key found — using the built-in hook heuristic to pick highlights")
         highlights = heuristic_highlights(transcript, count, band=band)
-        if len(highlights) < min_count:
+        # always top up to the exact count the user asked for
+        if len(highlights) < count:
             highlights = _pad_with_even_spacing(transcript, highlights, count, band=band)
+        highlights = highlights[:count]
         return HighlightSelection(highlights=highlights, provider="heuristic")
 
     prompt = build_prompt(transcript, min_count, count, min_seconds, max_seconds)
@@ -523,13 +515,28 @@ def select_highlights(
         )
         if not highlights:
             raise ValueError("model returned highlights that were all invalid")
+        highlights = _top_up(transcript, highlights, count, band)
         return HighlightSelection(highlights=highlights, provider=resolved, raw_response=raw)
     except Exception as exc:  # network / quota / parse problems -> never fail the job
         log(f"LLM highlight selection failed ({exc}); falling back to the heuristic picker")
         highlights = heuristic_highlights(transcript, count, band=band)
-        if len(highlights) < min_count:
-            highlights = _pad_with_even_spacing(transcript, highlights, count, band=band)
+        highlights = _top_up(transcript, highlights, count, band)
         return HighlightSelection(highlights=highlights, provider="heuristic (LLM fallback)")
+
+
+def _top_up(
+    transcript: Transcript, highlights: list[Highlight], count: int,
+    band: tuple[float, float, float, int],
+) -> list[Highlight]:
+    """Guarantee EXACTLY `count` clips: pad any shortfall, then trim any excess.
+
+    The user picked a number on the slider — that number is the contract. A
+    picker that finds fewer (sparse dialogue) gets topped up with evenly
+    spaced windows; one that finds more gets trimmed to the count.
+    """
+    if len(highlights) < count:
+        highlights = _pad_with_even_spacing(transcript, highlights, count, band=band)
+    return highlights[:count]
 
 
 def _pad_with_even_spacing(
