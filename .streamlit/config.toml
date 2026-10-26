@@ -1,0 +1,4 @@
+[server]
+# Per-file upload cap for st.file_uploader (Streamlit's default is 200 MB).
+# The API side allows up to MAX_UPLOAD_BYTES (4 GiB), so this is the binding limit.
+maxUploadSize = 300
